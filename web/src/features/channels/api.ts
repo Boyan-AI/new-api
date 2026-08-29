@@ -441,6 +441,43 @@ export async function deleteMultiKey(
   }) as Promise<{ success: boolean; message?: string }>
 }
 
+export async function setMultiKeyAlias(
+  channelId: number,
+  keyIndex: number,
+  alias: string
+): Promise<{ success: boolean; message?: string }> {
+  return manageMultiKeys({
+    channel_id: channelId,
+    action: 'set_alias',
+    key_index: keyIndex,
+    alias,
+  }) as Promise<{ success: boolean; message?: string }>
+}
+
+export async function testMultiKey(
+  channelId: number,
+  keyIndex: number,
+  testModel?: string
+): Promise<{
+  success: boolean
+  message?: string
+  time?: number
+  error_code?: string
+}> {
+  return manageMultiKeys({
+    channel_id: channelId,
+    action: 'test_key',
+    key_index: keyIndex,
+    test_model: testModel,
+    stream: false,
+  }) as Promise<{
+    success: boolean
+    message?: string
+    time?: number
+    error_code?: string
+  }>
+}
+
 /**
  * Enable all keys in multi-key channel
  */

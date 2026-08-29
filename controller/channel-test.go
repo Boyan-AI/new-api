@@ -41,6 +41,23 @@ type testResult struct {
 	newAPIError *types.NewAPIError
 }
 
+// channelForSingleKeyTest 构造只使用指定密钥的渠道副本，避免测试触发多密钥选择或故障转移。
+func channelForSingleKeyTest(channel *model.Channel, keyIndex int) (*model.Channel, error) {
+	if channel == nil || !channel.ChannelInfo.IsMultiKey {
+		return nil, errors.New("channel is not configured for multi-key testing")
+	}
+	keys := channel.GetKeys()
+	if keyIndex < 0 || keyIndex >= len(keys) {
+		return nil, errors.New("key index is out of range")
+	}
+	clone := *channel
+	clone.Key = keys[keyIndex]
+	clone.Keys = nil
+	clone.ChannelInfo.IsMultiKey = false
+	clone.ChannelInfo.MultiKeySize = 0
+	return &clone, nil
+}
+
 func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) string {
 	normalized := strings.TrimSpace(endpointType)
 	if normalized != "" {
@@ -515,7 +532,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		Group:            info.UsingGroup,
 		Other:            other,
 	})
-	common.SysLog(fmt.Sprintf("testing channel #%d, response: \n%s", channel.Id, string(respBody)))
+	common.SysLog(fmt.Sprintf("testing channel #%d succeeded", channel.Id))
 	return testResult{
 		context:     c,
 		localErr:    nil,

@@ -5537,6 +5537,12 @@
     "Zero retention": "Không lưu dữ liệu",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Key alias": "Bí danh khóa",
+    "Save alias": "Lưu bí danh",
+    "Test model": "Mô hình kiểm thử",
+    "Key test failed": "Kiểm thử khóa thất bại",
+    "Key test succeeded ({{time}}s)": "Kiểm thử khóa thành công ({{time}} giây)",
+    "Key tests send a real model request and may incur upstream charges.": "Kiểm thử khóa gửi yêu cầu mô hình thực và có thể phát sinh phí từ nhà cung cấp."
   }
 }

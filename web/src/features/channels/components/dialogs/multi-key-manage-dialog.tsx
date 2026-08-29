@@ -17,7 +17,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQueryClient } from '@tanstack/react-query'
-import { Loader2, RefreshCw, Trash2, Power, PowerOff } from 'lucide-react'
+import {
+  AlertTriangle,
+  Loader2,
+  RefreshCw,
+  Save,
+  Trash2,
+  Power,
+  PowerOff,
+} from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -27,6 +35,7 @@ import { StaticDataTable } from '@/components/data-table'
 import { Dialog } from '@/components/dialog'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import {
   Select,
   SelectContent,
@@ -51,6 +60,8 @@ import {
   enableAllMultiKeys,
   disableAllMultiKeys,
   deleteDisabledMultiKeys,
+  setMultiKeyAlias,
+  testMultiKey,
 } from '../../api'
 import { MULTI_KEY_FILTER_OPTIONS } from '../../constants'
 import {
@@ -100,12 +111,20 @@ export function MultiKeyManageDialog({
   const [confirmAction, setConfirmAction] =
     useState<MultiKeyConfirmAction | null>(null)
   const [isPerformingAction, setIsPerformingAction] = useState(false)
+  const [testingKeyIndex, setTestingKeyIndex] = useState<number | null>(null)
+  const [testModel, setTestModel] = useState('')
+  const [aliasDrafts, setAliasDrafts] = useState<Record<number, string>>({})
 
   // Reset and load data when dialog opens
   useEffect(() => {
     if (open && currentRow) {
       setCurrentPage(1)
       setStatusFilter(null)
+      setTestModel(
+        currentRow.test_model?.trim() ||
+          currentRow.models?.split(',')[0]?.trim() ||
+          ''
+      )
       loadKeyStatus(1, pageSize, null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -129,6 +148,14 @@ export function MultiKeyManageDialog({
 
       if (response.success && response.data) {
         setKeys(response.data.keys || [])
+        setAliasDrafts(
+          Object.fromEntries(
+            (response.data.keys || []).map((key) => [
+              key.index,
+              key.alias || '',
+            ])
+          )
+        )
         setTotal(response.data.total || 0)
         setCurrentPage(response.data.page || 1)
         setPageSize(response.data.page_size || 10)
@@ -149,7 +176,7 @@ export function MultiKeyManageDialog({
   }
 
   const handleStatusFilterChange = (value: string) => {
-    const newFilter = value === 'all' ? null : parseInt(value)
+    const newFilter = value === 'all' ? null : Number.parseInt(value)
     setStatusFilter(newFilter)
     setCurrentPage(1)
     loadKeyStatus(1, pageSize, newFilter)
@@ -228,6 +255,39 @@ export function MultiKeyManageDialog({
     )
   }
 
+  const handleAlias = async (key: KeyStatus) => {
+    if (!currentRow) return
+    const alias = aliasDrafts[key.index] || ''
+    const response = await setMultiKeyAlias(currentRow.id, key.index, alias)
+    if (response.success) {
+      toast.success(response.message || t('Operation successful'))
+      loadKeyStatus(currentPage, pageSize)
+    } else toast.error(response.message || t('Operation failed'))
+  }
+
+  const handleTest = async (key: KeyStatus) => {
+    if (!currentRow) return
+    setTestingKeyIndex(key.index)
+    try {
+      const response = await testMultiKey(
+        currentRow.id,
+        key.index,
+        testModel || undefined
+      )
+      if (response.success) {
+        toast.success(
+          t('Key test succeeded ({{time}}s)', {
+            time: response.time?.toFixed(2) || '0.00',
+          })
+        )
+      } else {
+        toast.error(response.message || t('Key test failed'))
+      }
+    } finally {
+      setTestingKeyIndex(null)
+    }
+  }
+
   const formatKeyTimestamp = (timestamp?: number) => {
     if (!timestamp) return '-'
     return formatTimestamp(timestamp)
@@ -291,15 +351,20 @@ export function MultiKeyManageDialog({
 
           <Separator className='shrink-0' />
 
+          <div className='text-muted-foreground flex shrink-0 items-center gap-2 text-xs'>
+            <AlertTriangle className='h-4 w-4' />
+            {t(
+              'Key tests send a real model request and may incur upstream charges.'
+            )}
+          </div>
+
           {/* Toolbar */}
           <div className='flex shrink-0 items-center justify-between'>
             <Select
-              items={[
-                ...MULTI_KEY_FILTER_OPTIONS.map((option) => ({
-                  value: option.value,
-                  label: t(option.label),
-                })),
-              ]}
+              items={MULTI_KEY_FILTER_OPTIONS.map((option) => ({
+                value: option.value,
+                label: t(option.label),
+              }))}
               value={statusFilter === null ? 'all' : statusFilter.toString()}
               onValueChange={(v) => v !== null && handleStatusFilterChange(v)}
             >
@@ -318,6 +383,13 @@ export function MultiKeyManageDialog({
             </Select>
 
             <div className='flex items-center gap-2'>
+              <Input
+                className='h-8 w-44'
+                value={testModel}
+                onChange={(event) => setTestModel(event.target.value)}
+                placeholder={t('Test model')}
+                aria-label={t('Test model')}
+              />
               <Button
                 variant='outline'
                 size='sm'
@@ -378,21 +450,57 @@ export function MultiKeyManageDialog({
 
           {/* Table */}
           <div className='min-h-0 flex-1 overflow-auto rounded-md border'>
-            {isLoading ? (
+            {isLoading && (
               <div className='flex items-center justify-center py-12'>
                 <Loader2 className='text-muted-foreground h-8 w-8 animate-spin' />
               </div>
-            ) : keys.length === 0 ? (
+            )}
+            {!isLoading && keys.length === 0 && (
               <div className='text-muted-foreground py-12 text-center'>
                 {t('No keys found')}
               </div>
-            ) : (
+            )}
+            {!isLoading && keys.length > 0 && (
               <StaticDataTable
                 className='rounded-none border-0'
                 tableClassName='min-w-[800px]'
                 data={keys}
                 getRowKey={(key) => key.index}
                 columns={[
+                  {
+                    id: 'alias',
+                    header: t('Alias'),
+                    className: 'min-w-[220px]',
+                    cell: (key) => (
+                      <div className='flex items-center gap-1'>
+                        <Input
+                          value={aliasDrafts[key.index] || ''}
+                          onChange={(event) =>
+                            setAliasDrafts((current) => ({
+                              ...current,
+                              [key.index]: event.target.value,
+                            }))
+                          }
+                          maxLength={80}
+                          placeholder={t('Key alias')}
+                          aria-label={t('Key alias')}
+                          className='h-8'
+                        />
+                        <Button
+                          variant='ghost'
+                          size='icon'
+                          onClick={() => handleAlias(key)}
+                          disabled={
+                            (aliasDrafts[key.index] || '').trim() ===
+                            (key.alias || '')
+                          }
+                          title={t('Save alias')}
+                        >
+                          <Save className='h-4 w-4' />
+                        </Button>
+                      </div>
+                    ),
+                  },
                   {
                     id: 'index',
                     header: t('Index'),
@@ -430,6 +538,8 @@ export function MultiKeyManageDialog({
                         status={key.status}
                         canDelete={canEditSensitive}
                         onAction={setConfirmAction}
+                        onTest={() => handleTest(key)}
+                        isTesting={testingKeyIndex === key.index}
                       />
                     ),
                   },

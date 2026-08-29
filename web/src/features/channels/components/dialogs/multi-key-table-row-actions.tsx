@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { Loader2, Play } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
@@ -27,6 +28,8 @@ type MultiKeyTableRowActionsProps = {
   status: number
   canDelete: boolean
   onAction: (action: MultiKeyConfirmAction) => void
+  onTest: () => void
+  isTesting?: boolean
 }
 
 export function MultiKeyTableRowActions({
@@ -34,12 +37,22 @@ export function MultiKeyTableRowActions({
   status,
   canDelete,
   onAction,
+  onTest,
+  isTesting = false,
 }: MultiKeyTableRowActionsProps) {
   const { t } = useTranslation()
   const isEnabled = status === 1
 
   return (
     <div className='flex justify-end gap-2'>
+      <Button variant='outline' size='sm' onClick={onTest} disabled={isTesting}>
+        {isTesting ? (
+          <Loader2 className='mr-1 h-4 w-4 animate-spin' />
+        ) : (
+          <Play className='mr-1 h-4 w-4' />
+        )}
+        {t('Test')}
+      </Button>
       {isEnabled ? (
         <Button
           variant='outline'

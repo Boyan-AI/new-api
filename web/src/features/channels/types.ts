@@ -28,6 +28,7 @@ export const channelInfoSchema = z.object({
   multi_key_status_list: z.record(z.string(), z.number()).optional(),
   multi_key_disabled_reason: z.record(z.string(), z.string()).optional(),
   multi_key_disabled_time: z.record(z.string(), z.number()).optional(),
+  multi_key_aliases: z.record(z.string(), z.string()).optional(),
   multi_key_polling_index: z.number().default(0),
   multi_key_mode: z.enum(['random', 'polling']).default('random'),
 })
@@ -224,6 +225,7 @@ export interface KeyStatus {
   disabled_time?: number
   reason?: string
   key_preview?: string
+  alias?: string
 }
 
 export type MultiKeyConfirmAction = {
@@ -311,7 +313,13 @@ export interface MultiKeyManageParams {
     | 'disable_all_keys'
     | 'delete_key'
     | 'delete_disabled_keys'
+    | 'set_alias'
+    | 'test_key'
   key_index?: number
+  alias?: string
+  test_model?: string
+  endpoint_type?: string
+  stream?: boolean
   page?: number
   page_size?: number
   status?: number // 1=enabled, 2=manual_disabled, 3=auto_disabled
