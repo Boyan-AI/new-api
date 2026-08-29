@@ -5316,6 +5316,12 @@
     "Zero retention": "Без хранения данных",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Key alias": "Псевдоним ключа",
+    "Save alias": "Сохранить псевдоним",
+    "Test model": "Тестовая модель",
+    "Key test failed": "Проверка ключа не удалась",
+    "Key test succeeded ({{time}}s)": "Проверка ключа успешна ({{time}} с)",
+    "Key tests send a real model request and may incur upstream charges.": "Проверка ключа отправляет реальный запрос модели и может привести к расходам у поставщика."
   }
 }

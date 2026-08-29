@@ -5316,6 +5316,12 @@
     "Zero retention": "零數據保留",
     "Zhipu": "智譜",
     "Zhipu V4": "智譜 V4",
-    "Zoom": "縮放"
+    "Zoom": "縮放",
+    "Key alias": "金鑰別名",
+    "Save alias": "儲存別名",
+    "Test model": "測試模型",
+    "Key test failed": "金鑰測試失敗",
+    "Key test succeeded ({{time}}s)": "金鑰測試成功（{{time}} 秒）",
+    "Key tests send a real model request and may incur upstream charges.": "金鑰測試會傳送真實模型請求，並可能產生上游費用。"
   }
 }

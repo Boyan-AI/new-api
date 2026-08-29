@@ -58,6 +58,45 @@ func TestValidateChannelProxy(t *testing.T) {
 	}
 }
 
+func TestChannelForSingleKeyTestBindsRequestedKey(t *testing.T) {
+	original := &model.Channel{
+		Id:  7,
+		Key: "first-key\nsecond-key",
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey:   true,
+			MultiKeySize: 2,
+		},
+	}
+
+	selected, err := channelForSingleKeyTest(original, 1)
+
+	require.NoError(t, err)
+	assert.Equal(t, "second-key", selected.Key)
+	assert.False(t, selected.ChannelInfo.IsMultiKey)
+	assert.Equal(t, 0, selected.ChannelInfo.MultiKeySize)
+	assert.True(t, original.ChannelInfo.IsMultiKey)
+}
+
+func TestChannelForSingleKeyTestRejectsInvalidIndex(t *testing.T) {
+	channel := &model.Channel{
+		Key:         "only-key",
+		ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 1},
+	}
+
+	_, err := channelForSingleKeyTest(channel, 1)
+
+	require.ErrorContains(t, err, "out of range")
+}
+
+func TestMultiKeyAliasIDIsStableAndDoesNotExposeKey(t *testing.T) {
+	first := multiKeyAliasID("sk-secret-value")
+	second := multiKeyAliasID("sk-secret-value")
+
+	assert.Equal(t, first, second)
+	assert.Len(t, first, 64)
+	assert.NotContains(t, first, "secret")
+}
+
 func TestValidateChannelRequiresNewAPIBaseURL(t *testing.T) {
 	tests := []struct {
 		name    string

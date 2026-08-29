@@ -2,12 +2,14 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -1461,12 +1463,16 @@ func CopyChannel(c *gin.Context) {
 
 // MultiKeyManageRequest represents the request for multi-key management operations
 type MultiKeyManageRequest struct {
-	ChannelId int    `json:"channel_id"`
-	Action    string `json:"action"`              // "disable_key", "enable_key", "delete_key", "delete_disabled_keys", "get_key_status"
-	KeyIndex  *int   `json:"key_index,omitempty"` // for disable_key, enable_key, and delete_key actions
-	Page      int    `json:"page,omitempty"`      // for get_key_status pagination
-	PageSize  int    `json:"page_size,omitempty"` // for get_key_status pagination
-	Status    *int   `json:"status,omitempty"`    // for get_key_status filtering: 1=enabled, 2=manual_disabled, 3=auto_disabled, nil=all
+	ChannelId    int    `json:"channel_id"`
+	Action       string `json:"action"`              // "disable_key", "enable_key", "delete_key", "delete_disabled_keys", "get_key_status", "set_alias", "test_key"
+	KeyIndex     *int   `json:"key_index,omitempty"` // for disable_key, enable_key, and delete_key actions
+	Alias        string `json:"alias,omitempty"`     // for set_alias
+	TestModel    string `json:"test_model,omitempty"`
+	EndpointType string `json:"endpoint_type,omitempty"`
+	Stream       bool   `json:"stream,omitempty"`
+	Page         int    `json:"page,omitempty"`      // for get_key_status pagination
+	PageSize     int    `json:"page_size,omitempty"` // for get_key_status pagination
+	Status       *int   `json:"status,omitempty"`    // for get_key_status filtering: 1=enabled, 2=manual_disabled, 3=auto_disabled, nil=all
 }
 
 // MultiKeyStatusResponse represents the response for key status query
@@ -1488,6 +1494,12 @@ type KeyStatus struct {
 	DisabledTime int64  `json:"disabled_time,omitempty"`
 	Reason       string `json:"reason,omitempty"`
 	KeyPreview   string `json:"key_preview"` // first 10 chars of key for identification
+	Alias        string `json:"alias,omitempty"`
+}
+
+// multiKeyAliasID 为别名元数据生成稳定且不可逆的密钥标识。
+func multiKeyAliasID(key string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
 }
 
 // ManageMultiKeys handles multi-key management operations
@@ -1532,8 +1544,10 @@ func ManageMultiKeys(c *gin.Context) {
 	}
 
 	lock := model.GetChannelPollingLock(channel.Id)
-	lock.Lock()
-	defer lock.Unlock()
+	if request.Action != "test_key" {
+		lock.Lock()
+		defer lock.Unlock()
+	}
 
 	switch request.Action {
 	case "get_key_status":
@@ -1583,6 +1597,10 @@ func ManageMultiKeys(c *gin.Context) {
 					reason = channel.ChannelInfo.MultiKeyDisabledReason[i]
 				}
 			}
+			alias := ""
+			if channel.ChannelInfo.MultiKeyAliases != nil {
+				alias = channel.ChannelInfo.MultiKeyAliases[multiKeyAliasID(key)]
+			}
 
 			// Create key preview (first 10 chars)
 			keyPreview := key
@@ -1596,6 +1614,7 @@ func ManageMultiKeys(c *gin.Context) {
 				DisabledTime: disabledTime,
 				Reason:       reason,
 				KeyPreview:   keyPreview,
+				Alias:        alias,
 			})
 		}
 
@@ -1648,6 +1667,62 @@ func ManageMultiKeys(c *gin.Context) {
 				AutoDisabledCount:   autoDisabledCount,   // Overall statistics
 			},
 		})
+		return
+
+	case "set_alias":
+		if request.KeyIndex == nil || *request.KeyIndex < 0 || *request.KeyIndex >= len(channel.GetKeys()) {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "密钥索引超出范围"})
+			return
+		}
+		alias := strings.TrimSpace(request.Alias)
+		if utf8.RuneCountInString(alias) > 80 {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "密钥别名不能超过 80 个字符"})
+			return
+		}
+		if channel.ChannelInfo.MultiKeyAliases == nil {
+			channel.ChannelInfo.MultiKeyAliases = make(map[string]string)
+		}
+		aliasID := multiKeyAliasID(channel.GetKeys()[*request.KeyIndex])
+		if alias == "" {
+			delete(channel.ChannelInfo.MultiKeyAliases, aliasID)
+		} else {
+			channel.ChannelInfo.MultiKeyAliases[aliasID] = alias
+		}
+		if err = channel.Update(); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		model.InitChannelCache()
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "密钥别名已更新"})
+		return
+
+	case "test_key":
+		if request.KeyIndex == nil || *request.KeyIndex < 0 || *request.KeyIndex >= len(channel.GetKeys()) {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "密钥索引超出范围", "time": 0.0})
+			return
+		}
+		testChannelCopy, cloneErr := channelForSingleKeyTest(channel, *request.KeyIndex)
+		if cloneErr != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": cloneErr.Error(), "time": 0.0})
+			return
+		}
+		testUserID, resolveErr := resolveChannelTestUserID(c)
+		if resolveErr != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": resolveErr.Error(), "time": 0.0})
+			return
+		}
+		startedAt := time.Now()
+		result := testChannel(c.Request.Context(), testChannelCopy, testUserID, request.TestModel, request.EndpointType, request.Stream)
+		elapsed := float64(time.Since(startedAt).Milliseconds()) / 1000.0
+		if result.localErr != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": result.localErr.Error(), "time": elapsed})
+			return
+		}
+		if result.newAPIError != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": result.newAPIError.Error(), "time": elapsed, "error_code": result.newAPIError.GetErrorCode()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "time": elapsed})
 		return
 
 	case "disable_key":
@@ -1825,6 +1900,9 @@ func ManageMultiKeys(c *gin.Context) {
 		}
 
 		keys := channel.GetKeys()
+		if channel.ChannelInfo.MultiKeyAliases != nil {
+			delete(channel.ChannelInfo.MultiKeyAliases, multiKeyAliasID(keys[keyIndex]))
+		}
 		var remainingKeys []string
 		var newStatusList = make(map[int]int)
 		var newDisabledTime = make(map[int]int64)
@@ -1905,6 +1983,9 @@ func ManageMultiKeys(c *gin.Context) {
 
 			// 只删除自动禁用（status == 3）的密钥，保留启用（status == 1）和手动禁用（status == 2）的密钥
 			if status == 3 {
+				if channel.ChannelInfo.MultiKeyAliases != nil {
+					delete(channel.ChannelInfo.MultiKeyAliases, multiKeyAliasID(key))
+				}
 				deletedCount++
 			} else {
 				remainingKeys = append(remainingKeys, key)

@@ -5316,6 +5316,12 @@
     "Zero retention": "データ保持なし",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V 4",
-    "Zoom": "ズーム"
+    "Zoom": "ズーム",
+    "Key alias": "キーの別名",
+    "Save alias": "別名を保存",
+    "Test model": "テストモデル",
+    "Key test failed": "キーのテストに失敗しました",
+    "Key test succeeded ({{time}}s)": "キーのテストに成功しました（{{time}}秒）",
+    "Key tests send a real model request and may incur upstream charges.": "キーのテストでは実際のモデルリクエストが送信され、上流料金が発生する場合があります。"
   }
 }

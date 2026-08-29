@@ -5316,6 +5316,12 @@
     "Zero retention": "Zero retention",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Key alias": "Key alias",
+    "Save alias": "Save alias",
+    "Test model": "Test model",
+    "Key test failed": "Key test failed",
+    "Key test succeeded ({{time}}s)": "Key test succeeded ({{time}}s)",
+    "Key tests send a real model request and may incur upstream charges.": "Key tests send a real model request and may incur upstream charges."
   }
 }
