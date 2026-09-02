@@ -26,7 +26,7 @@ import {
   Power,
   PowerOff,
 } from 'lucide-react'
-import { useState, useEffect } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -36,6 +36,7 @@ import { Dialog } from '@/components/dialog'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -63,7 +64,10 @@ import {
   setMultiKeyAlias,
   testMultiKey,
 } from '../../api'
-import { MULTI_KEY_FILTER_OPTIONS } from '../../constants'
+import {
+  CHANNEL_TEST_ENDPOINT_OPTIONS,
+  MULTI_KEY_FILTER_OPTIONS,
+} from '../../constants'
 import {
   channelsQueryKeys,
   formatTimestamp,
@@ -81,6 +85,83 @@ type MultiKeyManageDialogProps = {
   onOpenChange: (open: boolean) => void
 }
 
+type MultiKeyTestControlsProps = {
+  testModel: string
+  endpointType: string
+  onTestModelChange: (value: string) => void
+  onEndpointTypeChange: (value: string) => void
+}
+
+// 多密钥测试控件与渠道测试保持相同的模型输入和端点选择行为。
+export function MultiKeyTestControls({
+  testModel,
+  endpointType,
+  onTestModelChange,
+  onEndpointTypeChange,
+}: MultiKeyTestControlsProps) {
+  const { t } = useTranslation()
+  const endpointSelectItems = useMemo(
+    () =>
+      CHANNEL_TEST_ENDPOINT_OPTIONS.map((option) => ({
+        value: option.value,
+        label: t(option.label),
+      })),
+    [t]
+  )
+
+  return (
+    <div className='flex flex-wrap items-end gap-2'>
+      <div className='grid gap-1'>
+        <Label htmlFor='multi-key-test-model' className='text-xs'>
+          {t('Test model')}
+        </Label>
+        <Input
+          id='multi-key-test-model'
+          className='h-8 w-44'
+          value={testModel}
+          onChange={(event) => onTestModelChange(event.target.value)}
+          placeholder={t('Test model')}
+          aria-label={t('Test model')}
+        />
+      </div>
+      <div className='grid gap-1'>
+        <Label htmlFor='multi-key-endpoint-type' className='text-xs'>
+          {t('Endpoint Type')}
+        </Label>
+        <Select
+          items={endpointSelectItems}
+          value={endpointType}
+          onValueChange={(value) => {
+            if (value !== null) onEndpointTypeChange(value)
+          }}
+        >
+          <SelectTrigger id='multi-key-endpoint-type' className='h-8 w-64'>
+            <SelectValue
+              className='min-w-0 truncate'
+              placeholder={t('Auto detect (default)')}
+            />
+          </SelectTrigger>
+          <SelectContent
+            alignItemWithTrigger={false}
+            className='w-[460px] max-w-[calc(100vw-2rem)]'
+          >
+            <SelectGroup>
+              {endpointSelectItems.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  <span className='leading-snug break-words whitespace-normal'>
+                    {option.label}
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+  )
+}
+
+// 多密钥管理弹窗统一维护别名、状态操作和单 Key 测试参数。
 export function MultiKeyManageDialog({
   open,
   onOpenChange,
@@ -113,6 +194,7 @@ export function MultiKeyManageDialog({
   const [isPerformingAction, setIsPerformingAction] = useState(false)
   const [testingKeyIndex, setTestingKeyIndex] = useState<number | null>(null)
   const [testModel, setTestModel] = useState('')
+  const [endpointType, setEndpointType] = useState('auto')
   const [aliasDrafts, setAliasDrafts] = useState<Record<number, string>>({})
 
   // Reset and load data when dialog opens
@@ -120,6 +202,7 @@ export function MultiKeyManageDialog({
     if (open && currentRow) {
       setCurrentPage(1)
       setStatusFilter(null)
+      setEndpointType('auto')
       setTestModel(
         currentRow.test_model?.trim() ||
           currentRow.models?.split(',')[0]?.trim() ||
@@ -272,7 +355,8 @@ export function MultiKeyManageDialog({
       const response = await testMultiKey(
         currentRow.id,
         key.index,
-        testModel || undefined
+        testModel || undefined,
+        endpointType === 'auto' ? undefined : endpointType
       )
       if (response.success) {
         toast.success(
@@ -359,7 +443,7 @@ export function MultiKeyManageDialog({
           </div>
 
           {/* Toolbar */}
-          <div className='flex shrink-0 items-center justify-between'>
+          <div className='flex shrink-0 flex-wrap items-end justify-between gap-2'>
             <Select
               items={MULTI_KEY_FILTER_OPTIONS.map((option) => ({
                 value: option.value,
@@ -382,13 +466,12 @@ export function MultiKeyManageDialog({
               </SelectContent>
             </Select>
 
-            <div className='flex items-center gap-2'>
-              <Input
-                className='h-8 w-44'
-                value={testModel}
-                onChange={(event) => setTestModel(event.target.value)}
-                placeholder={t('Test model')}
-                aria-label={t('Test model')}
+            <div className='flex flex-wrap items-end gap-2'>
+              <MultiKeyTestControls
+                testModel={testModel}
+                endpointType={endpointType}
+                onTestModelChange={setTestModel}
+                onEndpointTypeChange={setEndpointType}
               />
               <Button
                 variant='outline'

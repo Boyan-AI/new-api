@@ -60,6 +60,10 @@ func channelForSingleKeyTest(channel *model.Channel, keyIndex int) (*model.Chann
 
 func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) string {
 	normalized := strings.TrimSpace(endpointType)
+	// 将前端的“自动检测”占位值还原为空，确保沿用按模型和渠道类型的自动判断逻辑。
+	if strings.EqualFold(normalized, "auto") {
+		normalized = ""
+	}
 	if normalized != "" {
 		return normalized
 	}

@@ -441,6 +441,7 @@ export async function deleteMultiKey(
   }) as Promise<{ success: boolean; message?: string }>
 }
 
+/** 更新指定密钥的自定义显示别名；传空字符串会恢复默认脱敏别名。 */
 export async function setMultiKeyAlias(
   channelId: number,
   keyIndex: number,
@@ -454,23 +455,31 @@ export async function setMultiKeyAlias(
   }) as Promise<{ success: boolean; message?: string }>
 }
 
+/** 测试指定密钥，并沿用渠道测试的端点选择语义。 */
 export async function testMultiKey(
   channelId: number,
   keyIndex: number,
-  testModel?: string
+  testModel?: string,
+  endpointType?: string
 ): Promise<{
   success: boolean
   message?: string
   time?: number
   error_code?: string
 }> {
-  return manageMultiKeys({
+  const params: MultiKeyManageParams = {
     channel_id: channelId,
     action: 'test_key',
     key_index: keyIndex,
-    test_model: testModel,
     stream: false,
-  }) as Promise<{
+  }
+  if (testModel) {
+    params.test_model = testModel
+  }
+  if (endpointType && endpointType !== 'auto') {
+    params.endpoint_type = endpointType
+  }
+  return manageMultiKeys(params) as Promise<{
     success: boolean
     message?: string
     time?: number

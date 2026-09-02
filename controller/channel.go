@@ -1119,6 +1119,16 @@ func UpdateChannel(c *gin.Context) {
 			// 覆盖模式：直接使用新密钥（默认行为，不需要特殊处理）
 		}
 	}
+	if channel.ChannelInfo.IsMultiKey && channel.ChannelInfo.MultiKeyAliases != nil {
+		keys := channel.GetKeys()
+		if len(keys) == 0 {
+			keys = originChannel.GetKeys()
+		}
+		pruneMultiKeyAliases(keys, channel.ChannelInfo.MultiKeyAliases)
+		if len(channel.ChannelInfo.MultiKeyAliases) == 0 {
+			channel.ChannelInfo.MultiKeyAliases = nil
+		}
+	}
 	err = channel.Update()
 	if err != nil {
 		common.ApiError(c, err)
@@ -1532,8 +1542,8 @@ type KeyStatus struct {
 	Status       int    `json:"status"` // 1: enabled, 2: disabled
 	DisabledTime int64  `json:"disabled_time,omitempty"`
 	Reason       string `json:"reason,omitempty"`
-	KeyPreview   string `json:"key_preview"` // first 10 chars of key for identification
-	Alias        string `json:"alias,omitempty"`
+	KeyPreview   string `json:"key_preview"`     // 脱敏后的密钥预览，用于识别
+	Alias        string `json:"alias,omitempty"` // 自定义别名或脱敏后的默认别名
 }
 
 // multiKeyAliasID 为别名元数据生成稳定且不可逆的密钥标识。
@@ -1541,7 +1551,35 @@ func multiKeyAliasID(key string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
 }
 
-// ManageMultiKeys handles multi-key management operations
+// multiKeyAliasForDisplay 返回密钥的有效显示别名；未设置自定义别名时只返回脱敏值。
+func multiKeyAliasForDisplay(key string, aliases map[string]string) string {
+	if aliases != nil {
+		if alias, ok := aliases[multiKeyAliasID(key)]; ok {
+			if alias = strings.TrimSpace(alias); alias != "" {
+				return alias
+			}
+		}
+	}
+	return model.MaskTokenKey(key)
+}
+
+// pruneMultiKeyAliases 删除已不在当前密钥列表中的别名，避免覆盖密钥后遗留脏元数据。
+func pruneMultiKeyAliases(keys []string, aliases map[string]string) {
+	if len(aliases) == 0 {
+		return
+	}
+	valid := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		valid[multiKeyAliasID(key)] = struct{}{}
+	}
+	for aliasID := range aliases {
+		if _, ok := valid[aliasID]; !ok {
+			delete(aliases, aliasID)
+		}
+	}
+}
+
+// ManageMultiKeys 处理多密钥状态、别名和单 Key 测试操作。
 func ManageMultiKeys(c *gin.Context) {
 	request := MultiKeyManageRequest{}
 	err := c.ShouldBindJSON(&request)
@@ -1636,16 +1674,10 @@ func ManageMultiKeys(c *gin.Context) {
 					reason = channel.ChannelInfo.MultiKeyDisabledReason[i]
 				}
 			}
-			alias := ""
-			if channel.ChannelInfo.MultiKeyAliases != nil {
-				alias = channel.ChannelInfo.MultiKeyAliases[multiKeyAliasID(key)]
-			}
+			alias := multiKeyAliasForDisplay(key, channel.ChannelInfo.MultiKeyAliases)
 
-			// Create key preview (first 10 chars)
-			keyPreview := key
-			if len(key) > 10 {
-				keyPreview = key[:10] + "..."
-			}
+			// 密钥预览与默认别名统一使用脱敏格式，避免接口泄露原始密钥。
+			keyPreview := model.MaskTokenKey(key)
 
 			allKeyStatusList = append(allKeyStatusList, KeyStatus{
 				Index:        i,
@@ -1724,6 +1756,9 @@ func ManageMultiKeys(c *gin.Context) {
 		aliasID := multiKeyAliasID(channel.GetKeys()[*request.KeyIndex])
 		if alias == "" {
 			delete(channel.ChannelInfo.MultiKeyAliases, aliasID)
+			if len(channel.ChannelInfo.MultiKeyAliases) == 0 {
+				channel.ChannelInfo.MultiKeyAliases = nil
+			}
 		} else {
 			channel.ChannelInfo.MultiKeyAliases[aliasID] = alias
 		}
@@ -1750,11 +1785,19 @@ func ManageMultiKeys(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"success": false, "message": resolveErr.Error(), "time": 0.0})
 			return
 		}
+		requestCtx := context.Background()
+		if c.Request != nil {
+			requestCtx = c.Request.Context()
+		}
 		startedAt := time.Now()
-		result := testChannel(c.Request.Context(), testChannelCopy, testUserID, request.TestModel, request.EndpointType, request.Stream)
+		result := testChannel(requestCtx, testChannelCopy, testUserID, request.TestModel, request.EndpointType, request.Stream)
 		elapsed := float64(time.Since(startedAt).Milliseconds()) / 1000.0
 		if result.localErr != nil {
-			c.JSON(http.StatusOK, gin.H{"success": false, "message": result.localErr.Error(), "time": elapsed})
+			response := gin.H{"success": false, "message": result.localErr.Error(), "time": elapsed}
+			if result.newAPIError != nil {
+				response["error_code"] = result.newAPIError.GetErrorCode()
+			}
+			c.JSON(http.StatusOK, response)
 			return
 		}
 		if result.newAPIError != nil {
