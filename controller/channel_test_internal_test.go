@@ -120,6 +120,22 @@ func TestResponsesCompactChannelSupport(t *testing.T) {
 	}
 }
 
+func TestBuildTestRequestResponsesIncludesCodexCompatibilityFields(t *testing.T) {
+	request, ok := buildTestRequest("gpt-5.6-sol", string(constant.EndpointTypeOpenAIResponse), &model.Channel{Type: constant.ChannelTypeOpenAI}, true).(*dto.OpenAIResponsesRequest)
+	require.True(t, ok)
+	assert.JSONEq(t, `""`, string(request.Instructions))
+	assert.JSONEq(t, `false`, string(request.Store))
+	assert.Equal(t, "gpt-5.6-sol", request.Model)
+	assert.True(t, *request.Stream)
+}
+
+func TestBuildTestRequestCodexIncludesCodexCompatibilityFields(t *testing.T) {
+	request, ok := buildTestRequest("gpt-5.6-codex", "", &model.Channel{Type: constant.ChannelTypeOpenAI}, false).(*dto.OpenAIResponsesRequest)
+	require.True(t, ok)
+	assert.JSONEq(t, `""`, string(request.Instructions))
+	assert.JSONEq(t, `false`, string(request.Store))
+}
+
 func TestMultiprotocolGatewayEndpointTypes(t *testing.T) {
 	want := []constant.EndpointType{
 		constant.EndpointTypeOpenAI,

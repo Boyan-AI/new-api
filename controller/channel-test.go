@@ -719,11 +719,13 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 				TopN:      lo.ToPtr(2),
 			}
 		case constant.EndpointTypeOpenAIResponse:
-			// 返回 OpenAIResponsesRequest
+			// Responses/Codex 兼容上游要求显式提供 instructions，并关闭服务端存储。
 			return &dto.OpenAIResponsesRequest{
-				Model:  model,
-				Input:  json.RawMessage(`[{"role":"user","content":"hi"}]`),
-				Stream: lo.ToPtr(isStream),
+				Model:        model,
+				Input:        json.RawMessage(`[{"role":"user","content":"hi"}]`),
+				Instructions: json.RawMessage(`""`),
+				Store:        json.RawMessage(`false`),
+				Stream:       lo.ToPtr(isStream),
 			}
 		case constant.EndpointTypeOpenAIResponseCompact:
 			// 返回 OpenAIResponsesCompactionRequest
@@ -798,9 +800,11 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 	// Responses-only models (e.g. codex series)
 	if strings.Contains(strings.ToLower(model), "codex") {
 		return &dto.OpenAIResponsesRequest{
-			Model:  model,
-			Input:  json.RawMessage(`[{"role":"user","content":"hi"}]`),
-			Stream: lo.ToPtr(isStream),
+			Model:        model,
+			Input:        json.RawMessage(`[{"role":"user","content":"hi"}]`),
+			Instructions: json.RawMessage(`""`),
+			Store:        json.RawMessage(`false`),
+			Stream:       lo.ToPtr(isStream),
 		}
 	}
 
