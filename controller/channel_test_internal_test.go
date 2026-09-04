@@ -58,6 +58,87 @@ func TestValidateChannelProxy(t *testing.T) {
 	}
 }
 
+func TestChannelForSingleKeyTestBindsRequestedKey(t *testing.T) {
+	original := &model.Channel{
+		Id:  7,
+		Key: "first-key\nsecond-key",
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey:   true,
+			MultiKeySize: 2,
+		},
+	}
+
+	selected, err := channelForSingleKeyTest(original, 1)
+
+	require.NoError(t, err)
+	assert.Equal(t, "second-key", selected.Key)
+	assert.False(t, selected.ChannelInfo.IsMultiKey)
+	assert.Equal(t, 0, selected.ChannelInfo.MultiKeySize)
+	assert.True(t, original.ChannelInfo.IsMultiKey)
+}
+
+func TestChannelForSingleKeyTestRejectsInvalidIndex(t *testing.T) {
+	channel := &model.Channel{
+		Key:         "only-key",
+		ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 1},
+	}
+
+	_, err := channelForSingleKeyTest(channel, 1)
+
+	require.ErrorContains(t, err, "out of range")
+}
+
+func TestMultiKeyAliasIDIsStableAndDoesNotExposeKey(t *testing.T) {
+	first := multiKeyAliasID("sk-secret-value")
+	second := multiKeyAliasID("sk-secret-value")
+
+	assert.Equal(t, first, second)
+	assert.Len(t, first, 64)
+	assert.NotContains(t, first, "secret")
+}
+
+func TestMultiKeyAliasForDisplayMasksKeyByDefault(t *testing.T) {
+	assert.Equal(t, "***", multiKeyAliasForDisplay("abc", nil))
+	assert.Equal(t, "sk-1**********cdef", multiKeyAliasForDisplay("sk-1234567890abcdef", nil))
+}
+
+func TestMultiKeyAliasForDisplayPrefersCustomAlias(t *testing.T) {
+	key := "sk-1234567890abcdef"
+	aliases := map[string]string{multiKeyAliasID(key): "production"}
+
+	assert.Equal(t, "production", multiKeyAliasForDisplay(key, aliases))
+}
+
+func TestMultiKeyAliasForDisplayFallsBackForBlankAlias(t *testing.T) {
+	key := "sk-1234567890abcdef"
+	aliases := map[string]string{multiKeyAliasID(key): "  "}
+
+	assert.Equal(t, "sk-1**********cdef", multiKeyAliasForDisplay(key, aliases))
+}
+
+func TestPruneMultiKeyAliasesKeepsAliasesByKeyFingerprint(t *testing.T) {
+	keys := []string{"key-b", "key-a"}
+	aliases := map[string]string{
+		multiKeyAliasID("key-a"):   "A",
+		multiKeyAliasID("key-b"):   "B",
+		multiKeyAliasID("removed"): "stale",
+	}
+
+	pruneMultiKeyAliases(keys, aliases)
+
+	assert.Equal(t, map[string]string{
+		multiKeyAliasID("key-a"): "A",
+		multiKeyAliasID("key-b"): "B",
+	}, aliases)
+}
+
+func TestNormalizeChannelTestEndpointTreatsAutoAsAutomatic(t *testing.T) {
+	channel := &model.Channel{Type: constant.ChannelTypeOpenAI}
+
+	assert.Empty(t, normalizeChannelTestEndpoint(channel, "auto"))
+	assert.Empty(t, normalizeChannelTestEndpoint(channel, " AUTO "))
+}
+
 func TestValidateChannelRequiresNewAPIBaseURL(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -41,8 +41,29 @@ type testResult struct {
 	newAPIError *types.NewAPIError
 }
 
+// channelForSingleKeyTest 构造只使用指定密钥的渠道副本，避免测试触发多密钥选择或故障转移。
+func channelForSingleKeyTest(channel *model.Channel, keyIndex int) (*model.Channel, error) {
+	if channel == nil || !channel.ChannelInfo.IsMultiKey {
+		return nil, errors.New("channel is not configured for multi-key testing")
+	}
+	keys := channel.GetKeys()
+	if keyIndex < 0 || keyIndex >= len(keys) {
+		return nil, errors.New("key index is out of range")
+	}
+	clone := *channel
+	clone.Key = keys[keyIndex]
+	clone.Keys = nil
+	clone.ChannelInfo.IsMultiKey = false
+	clone.ChannelInfo.MultiKeySize = 0
+	return &clone, nil
+}
+
 func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) string {
 	normalized := strings.TrimSpace(endpointType)
+	// 将前端的“自动检测”占位值还原为空，确保沿用按模型和渠道类型的自动判断逻辑。
+	if strings.EqualFold(normalized, "auto") {
+		normalized = ""
+	}
 	if normalized != "" {
 		return normalized
 	}
@@ -82,6 +103,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		constant.ChannelTypeJimeng,
 		constant.ChannelTypeDoubaoVideo,
 		constant.ChannelTypeVidu,
+		constant.ChannelTypeTaskPlugin,
 	}
 	if lo.Contains(unsupportedTestChannelTypes, channel.Type) {
 		channelTypeName := constant.GetChannelTypeName(channel.Type)
@@ -256,6 +278,13 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			context:     c,
 			localErr:    err,
 			newAPIError: types.NewError(err, types.ErrorCodeChannelModelMappedError),
+		}
+	}
+	if err = helper.ApplyReasoningModelSuffix(info, request); err != nil {
+		return testResult{
+			context:     c,
+			localErr:    err,
+			newAPIError: types.NewErrorWithStatusCode(err, types.ErrorCodeConvertRequestFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry()),
 		}
 	}
 
@@ -507,7 +536,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		Group:            info.UsingGroup,
 		Other:            other,
 	})
-	common.SysLog(fmt.Sprintf("testing channel #%d, response: \n%s", channel.Id, string(respBody)))
+	common.SysLog(fmt.Sprintf("testing channel #%d succeeded", channel.Id))
 	return testResult{
 		context:     c,
 		localErr:    nil,
@@ -946,7 +975,7 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 	}
 
 	if allowDisable && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
-		processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
+		processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, nil)
 		summary.Disabled++
 	}
 

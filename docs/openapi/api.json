@@ -3583,11 +3583,57 @@
                       "delete_key",
                       "delete_disabled_keys",
                       "enable_all_keys",
-                      "disable_all_keys"
+                      "disable_all_keys",
+                      "set_alias",
+                      "test_key"
                     ]
                   },
                   "key_index": {
                     "type": "integer"
+                  },
+                  "alias": {
+                    "type": "string",
+                    "maxLength": 80,
+                    "description": "Optional display alias for set_alias"
+                  },
+                  "test_model": {
+                    "type": "string",
+                    "description": "Model used by test_key"
+                  },
+                  "endpoint_type": {
+                    "type": "string",
+                    "enum": [
+                      "auto",
+                      "openai",
+                      "openai-response",
+                      "openai-response-compact",
+                      "anthropic",
+                      "gemini",
+                      "jina-rerank",
+                      "image-generation",
+                      "embeddings"
+                    ],
+                    "description": "Endpoint override for test_key; omit for automatic detection"
+                  },
+                  "stream": {
+                    "type": "boolean",
+                    "description": "Whether test_key should use streaming mode"
+                  },
+                  "page": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "page_size": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "status": {
+                    "type": "integer",
+                    "enum": [
+                      1,
+                      2,
+                      3
+                    ]
                   }
                 }
               }

@@ -2,17 +2,20 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaychannel "github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/ollama"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -480,6 +483,21 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 	if err := channel.ValidateSettings(); err != nil {
 		return fmt.Errorf("渠道额外设置[channel setting] 格式错误：%s", err.Error())
 	}
+	if channel.Type == constant.ChannelTypeTaskPlugin {
+		pluginKey := strings.TrimSpace(channel.GetSetting().TaskPluginKey)
+		if pluginKey == "" {
+			return fmt.Errorf("task plugin key is required")
+		}
+		if len(pluginKey) > 30 {
+			return fmt.Errorf("task plugin key must not exceed 30 characters")
+		}
+		if _, ok := jsplugin.DefaultRegistry.Get(pluginKey); !ok {
+			return fmt.Errorf("task plugin %q is not registered", pluginKey)
+		}
+		if channel.BaseURL == nil || strings.TrimSpace(*channel.BaseURL) == "" {
+			return fmt.Errorf("base URL is required for task plugin channels")
+		}
+	}
 
 	if channel.Type == constant.ChannelTypeNewAPI && strings.TrimSpace(channel.GetBaseURL()) == "" {
 		return fmt.Errorf("New API channel base URL cannot be empty")
@@ -614,6 +632,15 @@ func AddChannel(c *gin.Context) {
 	err := c.ShouldBindJSON(&addChannelRequest)
 	if err != nil {
 		common.ApiError(c, err)
+		return
+	}
+
+	if addChannelRequest.Channel != nil && addChannelRequest.Channel.Type == constant.ChannelTypeTaskPlugin &&
+		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.TaskPluginBind) {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "task plugin channels require the task_plugin.bind permission",
+		})
 		return
 	}
 
@@ -964,6 +991,15 @@ func UpdateChannel(c *gin.Context) {
 	}
 	clearChannelReadOnlyFields(&channel, requestData)
 
+	if channel.Type == constant.ChannelTypeTaskPlugin &&
+		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.TaskPluginBind) {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "task plugin channels require the task_plugin.bind permission",
+		})
+		return
+	}
+
 	// 使用统一的校验函数
 	if err := validateChannel(&channel.Channel, false); err != nil {
 		c.JSON(http.StatusOK, gin.H{
@@ -1081,6 +1117,16 @@ func UpdateChannel(c *gin.Context) {
 			}
 		case "replace":
 			// 覆盖模式：直接使用新密钥（默认行为，不需要特殊处理）
+		}
+	}
+	if channel.ChannelInfo.IsMultiKey && channel.ChannelInfo.MultiKeyAliases != nil {
+		keys := channel.GetKeys()
+		if len(keys) == 0 {
+			keys = originChannel.GetKeys()
+		}
+		pruneMultiKeyAliases(keys, channel.ChannelInfo.MultiKeyAliases)
+		if len(channel.ChannelInfo.MultiKeyAliases) == 0 {
+			channel.ChannelInfo.MultiKeyAliases = nil
 		}
 	}
 	err = channel.Update()
@@ -1299,7 +1345,7 @@ func FetchModels(c *gin.Context) {
 			baseURL = strings.TrimSpace(*req.BaseURL)
 		}
 		if baseURL == "" {
-			baseURL = constant.ChannelBaseURLs[req.Type]
+			baseURL = constant.GetChannelBaseURL(req.Type)
 		}
 
 		key := strings.TrimSpace(req.Key)
@@ -1424,6 +1470,11 @@ func CopyChannel(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取渠道信息失败，请稍后重试"})
 		return
 	}
+	if origin.Type == constant.ChannelTypeTaskPlugin &&
+		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.TaskPluginBind) {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "task plugin channels require the task_plugin.bind permission"})
+		return
+	}
 
 	// clone channel
 	clone := *origin // shallow copy is sufficient as we will overwrite primitives
@@ -1461,12 +1512,16 @@ func CopyChannel(c *gin.Context) {
 
 // MultiKeyManageRequest represents the request for multi-key management operations
 type MultiKeyManageRequest struct {
-	ChannelId int    `json:"channel_id"`
-	Action    string `json:"action"`              // "disable_key", "enable_key", "delete_key", "delete_disabled_keys", "get_key_status"
-	KeyIndex  *int   `json:"key_index,omitempty"` // for disable_key, enable_key, and delete_key actions
-	Page      int    `json:"page,omitempty"`      // for get_key_status pagination
-	PageSize  int    `json:"page_size,omitempty"` // for get_key_status pagination
-	Status    *int   `json:"status,omitempty"`    // for get_key_status filtering: 1=enabled, 2=manual_disabled, 3=auto_disabled, nil=all
+	ChannelId    int    `json:"channel_id"`
+	Action       string `json:"action"`              // "disable_key", "enable_key", "delete_key", "delete_disabled_keys", "get_key_status", "set_alias", "test_key"
+	KeyIndex     *int   `json:"key_index,omitempty"` // for disable_key, enable_key, and delete_key actions
+	Alias        string `json:"alias,omitempty"`     // for set_alias
+	TestModel    string `json:"test_model,omitempty"`
+	EndpointType string `json:"endpoint_type,omitempty"`
+	Stream       bool   `json:"stream,omitempty"`
+	Page         int    `json:"page,omitempty"`      // for get_key_status pagination
+	PageSize     int    `json:"page_size,omitempty"` // for get_key_status pagination
+	Status       *int   `json:"status,omitempty"`    // for get_key_status filtering: 1=enabled, 2=manual_disabled, 3=auto_disabled, nil=all
 }
 
 // MultiKeyStatusResponse represents the response for key status query
@@ -1487,10 +1542,44 @@ type KeyStatus struct {
 	Status       int    `json:"status"` // 1: enabled, 2: disabled
 	DisabledTime int64  `json:"disabled_time,omitempty"`
 	Reason       string `json:"reason,omitempty"`
-	KeyPreview   string `json:"key_preview"` // first 10 chars of key for identification
+	KeyPreview   string `json:"key_preview"`     // 脱敏后的密钥预览，用于识别
+	Alias        string `json:"alias,omitempty"` // 自定义别名或脱敏后的默认别名
 }
 
-// ManageMultiKeys handles multi-key management operations
+// multiKeyAliasID 为别名元数据生成稳定且不可逆的密钥标识。
+func multiKeyAliasID(key string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
+}
+
+// multiKeyAliasForDisplay 返回密钥的有效显示别名；未设置自定义别名时只返回脱敏值。
+func multiKeyAliasForDisplay(key string, aliases map[string]string) string {
+	if aliases != nil {
+		if alias, ok := aliases[multiKeyAliasID(key)]; ok {
+			if alias = strings.TrimSpace(alias); alias != "" {
+				return alias
+			}
+		}
+	}
+	return model.MaskTokenKey(key)
+}
+
+// pruneMultiKeyAliases 删除已不在当前密钥列表中的别名，避免覆盖密钥后遗留脏元数据。
+func pruneMultiKeyAliases(keys []string, aliases map[string]string) {
+	if len(aliases) == 0 {
+		return
+	}
+	valid := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		valid[multiKeyAliasID(key)] = struct{}{}
+	}
+	for aliasID := range aliases {
+		if _, ok := valid[aliasID]; !ok {
+			delete(aliases, aliasID)
+		}
+	}
+}
+
+// ManageMultiKeys 处理多密钥状态、别名和单 Key 测试操作。
 func ManageMultiKeys(c *gin.Context) {
 	request := MultiKeyManageRequest{}
 	err := c.ShouldBindJSON(&request)
@@ -1532,8 +1621,10 @@ func ManageMultiKeys(c *gin.Context) {
 	}
 
 	lock := model.GetChannelPollingLock(channel.Id)
-	lock.Lock()
-	defer lock.Unlock()
+	if request.Action != "test_key" {
+		lock.Lock()
+		defer lock.Unlock()
+	}
 
 	switch request.Action {
 	case "get_key_status":
@@ -1583,12 +1674,10 @@ func ManageMultiKeys(c *gin.Context) {
 					reason = channel.ChannelInfo.MultiKeyDisabledReason[i]
 				}
 			}
+			alias := multiKeyAliasForDisplay(key, channel.ChannelInfo.MultiKeyAliases)
 
-			// Create key preview (first 10 chars)
-			keyPreview := key
-			if len(key) > 10 {
-				keyPreview = key[:10] + "..."
-			}
+			// 密钥预览与默认别名统一使用脱敏格式，避免接口泄露原始密钥。
+			keyPreview := model.MaskTokenKey(key)
 
 			allKeyStatusList = append(allKeyStatusList, KeyStatus{
 				Index:        i,
@@ -1596,6 +1685,7 @@ func ManageMultiKeys(c *gin.Context) {
 				DisabledTime: disabledTime,
 				Reason:       reason,
 				KeyPreview:   keyPreview,
+				Alias:        alias,
 			})
 		}
 
@@ -1648,6 +1738,73 @@ func ManageMultiKeys(c *gin.Context) {
 				AutoDisabledCount:   autoDisabledCount,   // Overall statistics
 			},
 		})
+		return
+
+	case "set_alias":
+		if request.KeyIndex == nil || *request.KeyIndex < 0 || *request.KeyIndex >= len(channel.GetKeys()) {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "密钥索引超出范围"})
+			return
+		}
+		alias := strings.TrimSpace(request.Alias)
+		if utf8.RuneCountInString(alias) > 80 {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "密钥别名不能超过 80 个字符"})
+			return
+		}
+		if channel.ChannelInfo.MultiKeyAliases == nil {
+			channel.ChannelInfo.MultiKeyAliases = make(map[string]string)
+		}
+		aliasID := multiKeyAliasID(channel.GetKeys()[*request.KeyIndex])
+		if alias == "" {
+			delete(channel.ChannelInfo.MultiKeyAliases, aliasID)
+			if len(channel.ChannelInfo.MultiKeyAliases) == 0 {
+				channel.ChannelInfo.MultiKeyAliases = nil
+			}
+		} else {
+			channel.ChannelInfo.MultiKeyAliases[aliasID] = alias
+		}
+		if err = channel.Update(); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		model.InitChannelCache()
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "密钥别名已更新"})
+		return
+
+	case "test_key":
+		if request.KeyIndex == nil || *request.KeyIndex < 0 || *request.KeyIndex >= len(channel.GetKeys()) {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "密钥索引超出范围", "time": 0.0})
+			return
+		}
+		testChannelCopy, cloneErr := channelForSingleKeyTest(channel, *request.KeyIndex)
+		if cloneErr != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": cloneErr.Error(), "time": 0.0})
+			return
+		}
+		testUserID, resolveErr := resolveChannelTestUserID(c)
+		if resolveErr != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": resolveErr.Error(), "time": 0.0})
+			return
+		}
+		requestCtx := context.Background()
+		if c.Request != nil {
+			requestCtx = c.Request.Context()
+		}
+		startedAt := time.Now()
+		result := testChannel(requestCtx, testChannelCopy, testUserID, request.TestModel, request.EndpointType, request.Stream)
+		elapsed := float64(time.Since(startedAt).Milliseconds()) / 1000.0
+		if result.localErr != nil {
+			response := gin.H{"success": false, "message": result.localErr.Error(), "time": elapsed}
+			if result.newAPIError != nil {
+				response["error_code"] = result.newAPIError.GetErrorCode()
+			}
+			c.JSON(http.StatusOK, response)
+			return
+		}
+		if result.newAPIError != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": result.newAPIError.Error(), "time": elapsed, "error_code": result.newAPIError.GetErrorCode()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "time": elapsed})
 		return
 
 	case "disable_key":
@@ -1825,6 +1982,9 @@ func ManageMultiKeys(c *gin.Context) {
 		}
 
 		keys := channel.GetKeys()
+		if channel.ChannelInfo.MultiKeyAliases != nil {
+			delete(channel.ChannelInfo.MultiKeyAliases, multiKeyAliasID(keys[keyIndex]))
+		}
 		var remainingKeys []string
 		var newStatusList = make(map[int]int)
 		var newDisabledTime = make(map[int]int64)
@@ -1905,6 +2065,9 @@ func ManageMultiKeys(c *gin.Context) {
 
 			// 只删除自动禁用（status == 3）的密钥，保留启用（status == 1）和手动禁用（status == 2）的密钥
 			if status == 3 {
+				if channel.ChannelInfo.MultiKeyAliases != nil {
+					delete(channel.ChannelInfo.MultiKeyAliases, multiKeyAliasID(key))
+				}
 				deletedCount++
 			} else {
 				remainingKeys = append(remainingKeys, key)
@@ -2010,7 +2173,7 @@ func OllamaPullModel(c *gin.Context) {
 		return
 	}
 
-	baseURL := constant.ChannelBaseURLs[channel.Type]
+	baseURL := constant.GetChannelBaseURL(channel.Type)
 	if channel.GetBaseURL() != "" {
 		baseURL = channel.GetBaseURL()
 	}
@@ -2073,7 +2236,7 @@ func OllamaPullModelStream(c *gin.Context) {
 		return
 	}
 
-	baseURL := constant.ChannelBaseURLs[channel.Type]
+	baseURL := constant.GetChannelBaseURL(channel.Type)
 	if channel.GetBaseURL() != "" {
 		baseURL = channel.GetBaseURL()
 	}
@@ -2155,7 +2318,7 @@ func OllamaDeleteModel(c *gin.Context) {
 		return
 	}
 
-	baseURL := constant.ChannelBaseURLs[channel.Type]
+	baseURL := constant.GetChannelBaseURL(channel.Type)
 	if channel.GetBaseURL() != "" {
 		baseURL = channel.GetBaseURL()
 	}
@@ -2204,7 +2367,7 @@ func OllamaVersion(c *gin.Context) {
 		return
 	}
 
-	baseURL := constant.ChannelBaseURLs[channel.Type]
+	baseURL := constant.GetChannelBaseURL(channel.Type)
 	if channel.GetBaseURL() != "" {
 		baseURL = channel.GetBaseURL()
 	}

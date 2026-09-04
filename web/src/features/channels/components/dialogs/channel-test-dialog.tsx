@@ -88,6 +88,7 @@ import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { useIsMobile } from '@/hooks/use-mobile'
 
 import { updateChannel } from '../../api'
+import { CHANNEL_TEST_ENDPOINT_OPTIONS } from '../../constants'
 import {
   channelsQueryKeys,
   formatResponseTime,
@@ -177,27 +178,6 @@ function getLatestChannelTestCachePatch(
 
   return latest?.patch
 }
-
-const endpointTypeOptions: Array<{ value: string; label: string }> = [
-  { value: 'auto', label: 'Auto detect (default)' },
-  { value: 'openai', label: 'OpenAI (/v1/chat/completions)' },
-  { value: 'openai-response', label: 'OpenAI Responses (/v1/responses)' },
-  {
-    value: 'openai-response-compact',
-    label: 'OpenAI Response Compaction (/v1/responses/compact)',
-  },
-  { value: 'anthropic', label: 'Anthropic (/v1/messages)' },
-  {
-    value: 'gemini',
-    label: 'Gemini (/v1beta/models/{model}:generateContent)',
-  },
-  { value: 'jina-rerank', label: 'Jina Rerank (/v1/rerank)' },
-  {
-    value: 'image-generation',
-    label: 'Image Generation (/v1/images/generations)',
-  },
-  { value: 'embeddings', label: 'Embeddings (/v1/embeddings)' },
-]
 
 const endpointSelectContentClass = 'w-[460px] max-w-[calc(100vw-2rem)]'
 const endpointSelectItemClass =
@@ -357,7 +337,7 @@ function ChannelTestDialogContent({
   })
   const endpointSelectItems = useMemo(
     () =>
-      endpointTypeOptions.map((option) => ({
+      CHANNEL_TEST_ENDPOINT_OPTIONS.map((option) => ({
         value: option.value,
         label: t(option.label),
       })),
