@@ -41,6 +41,12 @@ type testResult struct {
 	newAPIError *types.NewAPIError
 }
 
+const (
+	codexChannelTestID         = "00000000-0000-4000-8000-000000000000"
+	codexChannelTestUserAgent  = "codex_cli_rs/0.0.0 (new-api channel test)"
+	codexChannelTestOriginator = "codex_cli_rs"
+)
+
 // channelForSingleKeyTest 构造只使用指定密钥的渠道副本，避免测试触发多密钥选择或故障转移。
 func channelForSingleKeyTest(channel *model.Channel, keyIndex int) (*model.Channel, error) {
 	if channel == nil || !channel.ChannelInfo.IsMultiKey {
@@ -90,6 +96,7 @@ func resolveChannelTestUserID(c *gin.Context) (int, error) {
 	return rootUser.Id, nil
 }
 
+// testChannel 使用指定渠道执行一次与目标协议一致的真实上游请求，并返回脱敏后的测试结果。
 func testChannel(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) testResult {
 	if ctx == nil {
 		ctx = context.Background()
@@ -247,6 +254,9 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			relayFormat = types.RelayFormatOpenAIResponsesCompaction
 		}
 	}
+	if relayFormat == types.RelayFormatOpenAIResponses {
+		isStream = true
+	}
 
 	request := buildTestRequest(testModel, endpointType, channel, isStream)
 
@@ -262,6 +272,9 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 
 	info.IsChannelTest = true
 	info.InitChannelMeta(c)
+	if relayFormat == types.RelayFormatOpenAIResponses {
+		configureCodexResponsesChannelTest(c, info)
+	}
 
 	err = attachTestBillingRequestInput(info, request)
 	if err != nil {
@@ -719,6 +732,7 @@ func detectErrorMessageFromJSONBytes(jsonBytes []byte) string {
 	return message
 }
 
+// buildTestRequest 按测试端点构造最小但协议真实的请求，避免健康检查使用不兼容的占位格式。
 func buildTestRequest(model string, endpointType string, channel *model.Channel, isStream bool) dto.Request {
 	testResponsesInput := json.RawMessage(`[{"role":"user","content":"hi"}]`)
 
@@ -748,14 +762,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 				TopN:      lo.ToPtr(2),
 			}
 		case constant.EndpointTypeOpenAIResponse:
-			// Responses/Codex 兼容上游要求显式提供 instructions，并关闭服务端存储。
-			return &dto.OpenAIResponsesRequest{
-				Model:        model,
-				Input:        json.RawMessage(`[{"role":"user","content":"hi"}]`),
-				Instructions: json.RawMessage(`""`),
-				Store:        json.RawMessage(`false`),
-				Stream:       lo.ToPtr(isStream),
-			}
+			return buildCodexResponsesTestRequest(model)
 		case constant.EndpointTypeOpenAIResponseCompact:
 			// 返回 OpenAIResponsesCompactionRequest
 			return &dto.OpenAIResponsesCompactionRequest{
@@ -828,13 +835,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 
 	// Responses-only models (e.g. codex series)
 	if strings.Contains(strings.ToLower(model), "codex") {
-		return &dto.OpenAIResponsesRequest{
-			Model:        model,
-			Input:        json.RawMessage(`[{"role":"user","content":"hi"}]`),
-			Instructions: json.RawMessage(`""`),
-			Store:        json.RawMessage(`false`),
-			Stream:       lo.ToPtr(isStream),
-		}
+		return buildCodexResponsesTestRequest(model)
 	}
 
 	// Chat/Completion 请求 - 返回 GeneralOpenAIRequest
@@ -865,6 +866,51 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 	}
 
 	return testRequest
+}
+
+// buildCodexResponsesTestRequest 复现 Codex CLI 的稳定 Responses 字段，同时使用固定脱敏标识避免泄露真实会话信息。
+func buildCodexResponsesTestRequest(model string) *dto.OpenAIResponsesRequest {
+	return &dto.OpenAIResponsesRequest{
+		Model:             model,
+		Input:             json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]`),
+		Include:           json.RawMessage(`["reasoning.encrypted_content"]`),
+		ParallelToolCalls: json.RawMessage(`false`),
+		PromptCacheKey:    json.RawMessage(`"` + codexChannelTestID + `"`),
+		Reasoning: &dto.Reasoning{
+			Effort:  "low",
+			Context: json.RawMessage(`"all_turns"`),
+		},
+		Store:      json.RawMessage(`false`),
+		Stream:     lo.ToPtr(true),
+		Text:       json.RawMessage(`{"verbosity":"low"}`),
+		ToolChoice: json.RawMessage(`"auto"`),
+		ClientMetadata: json.RawMessage(`{` +
+			`"turn_id":"` + codexChannelTestID + `",` +
+			`"session_id":"` + codexChannelTestID + `",` +
+			`"thread_id":"` + codexChannelTestID + `",` +
+			`"root_turn_id":"` + codexChannelTestID + `",` +
+			`"x-codex-installation-id":"` + codexChannelTestID + `"}`),
+	}
+}
+
+// configureCodexResponsesChannelTest 注入真实 Codex CLI 的协议 Header，并保留渠道已有的静态覆盖配置。
+func configureCodexResponsesChannelTest(c *gin.Context, info *relaycommon.RelayInfo) {
+	if c != nil && c.Request != nil {
+		c.Request.Header.Set("Accept", "text/event-stream")
+	}
+	if info == nil {
+		return
+	}
+
+	headerOverride := relaycommon.GetEffectiveHeaderOverride(info)
+	if _, exists := headerOverride["user-agent"]; !exists {
+		headerOverride["user-agent"] = codexChannelTestUserAgent
+	}
+	if _, exists := headerOverride["originator"]; !exists {
+		headerOverride["originator"] = codexChannelTestOriginator
+	}
+	info.RuntimeHeadersOverride = headerOverride
+	info.UseRuntimeHeadersOverride = true
 }
 
 func TestChannel(c *gin.Context) {

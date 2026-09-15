@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -13,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
@@ -201,20 +203,118 @@ func TestResponsesCompactChannelSupport(t *testing.T) {
 	}
 }
 
+// TestBuildTestRequestResponsesIncludesCodexCompatibilityFields 验证显式 Responses 测试复现 Codex CLI 的稳定请求字段。
 func TestBuildTestRequestResponsesIncludesCodexCompatibilityFields(t *testing.T) {
 	request, ok := buildTestRequest("gpt-5.6-sol", string(constant.EndpointTypeOpenAIResponse), &model.Channel{Type: constant.ChannelTypeOpenAI}, true).(*dto.OpenAIResponsesRequest)
 	require.True(t, ok)
-	assert.JSONEq(t, `""`, string(request.Instructions))
+	assert.Empty(t, request.Instructions)
+	assert.JSONEq(t, `[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]`, string(request.Input))
+	assert.JSONEq(t, `["reasoning.encrypted_content"]`, string(request.Include))
+	assert.JSONEq(t, `false`, string(request.ParallelToolCalls))
+	assert.JSONEq(t, `"`+codexChannelTestID+`"`, string(request.PromptCacheKey))
+	require.NotNil(t, request.Reasoning)
+	assert.Equal(t, "low", request.Reasoning.Effort)
+	assert.JSONEq(t, `"all_turns"`, string(request.Reasoning.Context))
 	assert.JSONEq(t, `false`, string(request.Store))
+	assert.JSONEq(t, `{"verbosity":"low"}`, string(request.Text))
+	assert.JSONEq(t, `"auto"`, string(request.ToolChoice))
+	assert.JSONEq(t, `{
+		"turn_id":"00000000-0000-4000-8000-000000000000",
+		"session_id":"00000000-0000-4000-8000-000000000000",
+		"thread_id":"00000000-0000-4000-8000-000000000000",
+		"root_turn_id":"00000000-0000-4000-8000-000000000000",
+		"x-codex-installation-id":"00000000-0000-4000-8000-000000000000"
+	}`, string(request.ClientMetadata))
 	assert.Equal(t, "gpt-5.6-sol", request.Model)
 	assert.True(t, *request.Stream)
 }
 
+// TestBuildTestRequestCodexIncludesCodexCompatibilityFields 验证自动识别的 Codex 模型复用同一真实请求契约。
 func TestBuildTestRequestCodexIncludesCodexCompatibilityFields(t *testing.T) {
 	request, ok := buildTestRequest("gpt-5.6-codex", "", &model.Channel{Type: constant.ChannelTypeOpenAI}, false).(*dto.OpenAIResponsesRequest)
 	require.True(t, ok)
-	assert.JSONEq(t, `""`, string(request.Instructions))
+	assert.Empty(t, request.Instructions)
 	assert.JSONEq(t, `false`, string(request.Store))
+	require.NotNil(t, request.Stream)
+	assert.True(t, *request.Stream)
+}
+
+// TestAnyRouterResponsesChannelTestSendsCodexCLIContract 验证最终出站请求满足 AnyRouter 用于识别 Codex 客户端的协议契约。
+func TestAnyRouterResponsesChannelTestSendsCodexCLIContract(t *testing.T) {
+	type capturedRequest struct {
+		header http.Header
+		body   []byte
+		err    error
+	}
+	captured := make(chan capturedRequest, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		captured <- capturedRequest{header: request.Header.Clone(), body: body, err: err}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+
+	gin.SetMode(gin.TestMode)
+	contextRecorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(contextRecorder)
+	context.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	context.Request.Header.Set("Content-Type", "application/json")
+
+	request := buildCodexResponsesTestRequest("gpt-6-astra")
+	info := relaycommon.GenRelayInfoResponses(context, request)
+	info.IsChannelTest = true
+	info.RequestURLPath = "/v1/responses"
+	info.ChannelMeta = &relaycommon.ChannelMeta{
+		ChannelType:       constant.ChannelTypeOpenAI,
+		ChannelBaseUrl:    upstream.URL,
+		ApiKey:            "test-key",
+		UpstreamModelName: "gpt-6-astra",
+		HeadersOverride: map[string]interface{}{
+			"anthropic-beta": "context-1m-2025-08-07",
+		},
+	}
+	configureCodexResponsesChannelTest(context, info)
+
+	adaptor := relay.GetAdaptor(constant.APITypeOpenAI)
+	require.NotNil(t, adaptor)
+	adaptor.Init(info)
+	converted, err := adaptor.ConvertOpenAIResponsesRequest(context, info, *request)
+	require.NoError(t, err)
+	body, err := common.Marshal(converted)
+	require.NoError(t, err)
+
+	response, err := adaptor.DoRequest(context, info, bytes.NewReader(body))
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	require.NoError(t, response.(*http.Response).Body.Close())
+
+	actual := <-captured
+	require.NoError(t, actual.err)
+	assert.Equal(t, "Bearer test-key", actual.header.Get("Authorization"))
+	assert.Equal(t, "text/event-stream", actual.header.Get("Accept"))
+	assert.Equal(t, codexChannelTestOriginator, actual.header.Get("Originator"))
+	assert.Equal(t, codexChannelTestUserAgent, actual.header.Get("User-Agent"))
+	assert.Equal(t, "context-1m-2025-08-07", actual.header.Get("Anthropic-Beta"))
+	assert.JSONEq(t, `{
+		"model":"gpt-6-astra",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"include":["reasoning.encrypted_content"],
+		"parallel_tool_calls":false,
+		"prompt_cache_key":"00000000-0000-4000-8000-000000000000",
+		"reasoning":{"effort":"low","context":"all_turns"},
+		"store":false,
+		"stream":true,
+		"text":{"verbosity":"low"},
+		"tool_choice":"auto",
+		"client_metadata":{
+			"turn_id":"00000000-0000-4000-8000-000000000000",
+			"session_id":"00000000-0000-4000-8000-000000000000",
+			"thread_id":"00000000-0000-4000-8000-000000000000",
+			"root_turn_id":"00000000-0000-4000-8000-000000000000",
+			"x-codex-installation-id":"00000000-0000-4000-8000-000000000000"
+		}
+	}`, string(actual.body))
 }
 
 func TestMultiprotocolGatewayEndpointTypes(t *testing.T) {
