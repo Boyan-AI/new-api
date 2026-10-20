@@ -70,6 +70,7 @@ func geminiRelayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 	return err
 }
 
+// Relay 处理转发和计费，并在未输出响应时保留渠道切换与本地 CPA 的有限恢复机会。
 func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	requestId := c.GetString(common.RequestIdKey)
@@ -192,6 +193,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
+	var recovery cpaRecovery
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		relayInfo.RetryIndex = retryParam.GetRetry()
@@ -241,6 +243,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
 
 		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
+			// 常规渠道重试先行；耗尽后才等待本地 CPA 恢复，不再次预扣请求额度。
+			if retryParam.GetRetry() >= common.RetryTimes && recovery.wait(c, channel, newAPIError) {
+				retryParam.ResetRetryNextTry()
+				continue
+			}
 			break
 		}
 	}
@@ -362,7 +369,11 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 	return channel, nil
 }
 
+// shouldRetry 尊重取消、已提交响应和用户渠道约束，避免流中断后重放请求。
 func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) bool {
+	if c.Writer.Written() || c.Request.Context().Err() != nil {
+		return false
+	}
 	if openaiErr == nil {
 		return false
 	}
