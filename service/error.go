@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	taskdto "github.com/QuantumNous/new-api/dto"
@@ -84,14 +85,21 @@ func ClaudeErrorWrapperLocal(err error, code string, statusCode int) *dto.Claude
 	return claudeErr
 }
 
+// RelayErrorHandler 解析正式上游错误，所有返回分支保留 Retry-After 并关闭响应体。
 func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFail bool) (newApiErr *types.NewAPIError) {
 	newApiErr = types.InitOpenAIError(types.ErrorCodeBadResponseStatusCode, resp.StatusCode)
+	retryAt, hasRetryAfter := parseUpstreamRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	defer func() {
+		if hasRetryAfter && newApiErr != nil && newApiErr.Err != nil {
+			newApiErr.Err = &upstreamRetryHint{err: newApiErr.Err, retryAt: retryAt}
+		}
+	}()
 
+	defer CloseResponseBodyGracefully(resp)
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return
 	}
-	CloseResponseBodyGracefully(resp)
 	var errResponse dto.GeneralErrorResponse
 	responseBodyText := string(responseBody)
 	responseBodyPreview := common.LocalLogPreview(responseBodyText)

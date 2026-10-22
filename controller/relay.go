@@ -1,11 +1,13 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -70,7 +72,7 @@ func geminiRelayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 	return err
 }
 
-// Relay 处理转发和计费，并在未输出响应时保留渠道切换与本地 CPA 的有限恢复机会。
+// Relay 处理转发和计费，为所有模型保留有限渠道恢复，并禁止重放已经提交的响应。
 func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	requestId := c.GetString(common.RequestIdKey)
@@ -95,6 +97,17 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	defer func() {
 		if newAPIError != nil {
 			logger.LogError(c, fmt.Sprintf("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
+			// 已开始的 HTTP 流不能再附加独立 JSON 错误；实时协议仍使用原生错误帧。
+			if c.Writer.Written() && relayFormat != types.RelayFormatOpenAIRealtime {
+				return
+			}
+			if delay := service.UpstreamRetryDelay(newAPIError); delay > 0 {
+				seconds := int64(delay / time.Second)
+				if delay%time.Second != 0 {
+					seconds++
+				}
+				c.Header("Retry-After", strconv.FormatInt(seconds, 10))
+			}
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
 			switch relayFormat {
 			case types.RelayFormatOpenAIRealtime:
@@ -193,10 +206,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
-	var recovery cpaRecovery
+	var recovery channelRecovery
+	defer recovery.close()
 
-	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
-		relayInfo.RetryIndex = retryParam.GetRetry()
+	for ; recovery.beginAttempt(c); retryParam.IncreaseRetry() {
+		relayInfo.RetryIndex = recovery.attempts - 1
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())
@@ -231,6 +245,14 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		default:
 			newAPIError = relayHandler(c, relayInfo)
 		}
+		// 仅将本恢复窗口耗尽映射为 60 秒超时，客户端更早的截止仍保留原失败原因。
+		if !c.Writer.Written() && !recovery.deadline.IsZero() && !time.Now().Before(recovery.deadline) &&
+			errors.Is(context.Cause(c.Request.Context()), context.DeadlineExceeded) {
+			newAPIError = types.NewErrorWithStatusCode(
+				errors.New("upstream recovery timed out after 60 seconds; model unchanged"),
+				types.ErrorCodeDoRequestFailed, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry(),
+			)
+		}
 
 		if newAPIError == nil {
 			relayInfo.LastError = nil
@@ -242,12 +264,14 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
 
-		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
-			// 常规渠道重试先行；耗尽后才等待本地 CPA 恢复，不再次预扣请求额度。
-			if retryParam.GetRetry() >= common.RetryTimes && recovery.wait(c, channel, newAPIError) {
-				retryParam.ResetRetryNextTry()
-				continue
+		if isTransientUpstreamFailure(newAPIError) {
+			if !recovery.wait(c, newAPIError) {
+				break
 			}
+			// 继续推进原生优先级与 Key 选择，不重置索引而重复困在同一优先级。
+			continue
+		}
+		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
 			break
 		}
 	}
@@ -380,9 +404,6 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
 		return false
 	}
-	if types.IsChannelError(openaiErr) {
-		return true
-	}
 	if types.IsSkipRetryError(openaiErr) {
 		return false
 	}
@@ -391,6 +412,9 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	}
 	if service.GetChannelConstraints(c).SuppressesRetry() {
 		return false
+	}
+	if types.IsChannelError(openaiErr) {
+		return true
 	}
 	code := openaiErr.StatusCode
 	if code >= 200 && code < 300 {

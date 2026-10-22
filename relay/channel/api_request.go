@@ -487,9 +487,18 @@ func keepUpstreamRedirectResponse(_ *http.Request, _ []*http.Request) error {
 	return http.ErrUseLastResponse
 }
 
+// doRequest 在共同 HTTP 出口继承客户端取消和恢复预算，同时保留调用方更严格的截止。
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
+	ctx, cancel := context.WithCancel(req.Context())
+	stopCancellation := context.AfterFunc(c.Request.Context(), cancel)
+	if c.Request.Context().Err() != nil {
+		cancel()
+	}
+	req = req.WithContext(ctx)
 	client, err := service.GetHttpClientWithProxySettings(info.ChannelSetting.Proxy, info.ChannelSetting)
 	if err != nil {
+		stopCancellation()
+		cancel()
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
 	}
 	// Clients are cached and shared across channels, so override redirect
@@ -531,12 +540,18 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 
 	resp, err := relayClient.Do(req)
 	if err != nil {
+		stopCancellation()
+		cancel()
 		logger.LogError(c, "do request failed: "+err.Error())
 		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
 	}
 	if resp == nil {
+		stopCancellation()
+		cancel()
 		return nil, errors.New("resp is nil")
 	}
+	// 请求上下文必须活到响应体关闭，不能在收到响应头时提前取消正常流。
+	resp.Body = &upstreamResponseBody{ReadCloser: resp.Body, cancel: cancel, stopCancellation: stopCancellation}
 	if common2.DebugEnabled {
 		policy := service.NormalizeHTTPTransportPolicy(info.ChannelSetting)
 		logger.LogDebug(c, fmt.Sprintf(
@@ -556,6 +571,25 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	_ = req.Body.Close()
 	_ = c.Request.Body.Close()
 	return resp, nil
+}
+
+// upstreamResponseBody 在响应体关闭时释放取消桥接，避免成功请求遗留回调和上下文。
+type upstreamResponseBody struct {
+	io.ReadCloser
+	cancel           context.CancelFunc
+	stopCancellation func() bool
+	closeOnce        sync.Once
+}
+
+// Close 幂等清理客户端取消传播，并保持原响应体的关闭结果。
+func (b *upstreamResponseBody) Close() error {
+	var err error
+	b.closeOnce.Do(func() {
+		b.stopCancellation()
+		b.cancel()
+		err = b.ReadCloser.Close()
+	})
+	return err
 }
 
 func DoTaskApiRequest(a TaskAdaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {

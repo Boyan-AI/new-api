@@ -2,14 +2,93 @@ package channel
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestDoRequestPropagatesClientCancellation 验证共同 HTTP 出口及时取消尚未收到响应头的上游请求。
+func TestDoRequestPropagatesClientCancellation(t *testing.T) {
+	service.InitHttpClient()
+	started := make(chan struct{})
+	finished := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		close(started)
+		<-r.Context().Done()
+		close(finished)
+	}))
+	defer upstream.Close()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(parent)
+	req, err := http.NewRequest(http.MethodPost, upstream.URL, strings.NewReader("{}"))
+	require.NoError(t, err)
+	result := make(chan error, 1)
+	go func() {
+		_, err := doRequest(c, req, &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}})
+		result <- err
+	}()
+	<-started
+	cancel()
+	require.Error(t, <-result)
+	<-finished
+}
+
+// TestDoRequestKeepsContextThroughResponseBody 验证响应头到达不会提前取消，而用户取消能中止响应体读取。
+func TestDoRequestKeepsContextThroughResponseBody(t *testing.T) {
+	service.InitHttpClient()
+	finished := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_, _ = io.WriteString(w, "first")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+		close(finished)
+	}))
+	defer upstream.Close()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(parent)
+	req, err := http.NewRequest(http.MethodPost, upstream.URL, strings.NewReader("{}"))
+	require.NoError(t, err)
+	resp, err := doRequest(c, req, &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}})
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	first := make([]byte, 5)
+	_, err = io.ReadFull(resp.Body, first)
+	require.NoError(t, err)
+	assert.Equal(t, "first", string(first))
+	assert.NoError(t, resp.Request.Context().Err())
+	cancel()
+	_, err = io.ReadAll(resp.Body)
+	require.Error(t, err)
+	<-finished
+}
+
+// TestDoRequestPreservesUpstreamCancellation 验证桥接客户端取消不会丢失调用方原有取消约束。
+func TestDoRequestPreservesUpstreamCancellation(t *testing.T) {
+	service.InitHttpClient()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	upstreamCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, "http://127.0.0.1:1", strings.NewReader("{}"))
+	require.NoError(t, err)
+	resp, err := doRequest(c, req, &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}})
+	assert.Nil(t, resp)
+	require.Error(t, err)
+}
 
 func TestNewTaskAPIRequestInheritsClientCancellation(t *testing.T) {
 	recorder := httptest.NewRecorder()
